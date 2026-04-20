@@ -1,0 +1,45 @@
+registry: ghcr.io/activeprospect
+tag: latest
+
+ingestion:
+  replicaCount: 4
+  image:
+    pullPolicy: IfNotPresent
+  resources:
+    requests: {cpu: 200m, memory: 128Mi}
+    limits:   {cpu: 1000m, memory: 256Mi}
+  autoscaling:
+    enabled: true
+    minReplicas: 4
+    maxReplicas: 64          # matches Kafka partition count
+    targetCPUUtilizationPercentage: 70
+  env:
+    KAFKA_BROKERS: ""        # required — set in environment overlay
+    REDIS_URL: ""            # required — set in environment overlay
+    OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+billingApi:
+  replicaCount: 2
+  image:
+    pullPolicy: IfNotPresent
+  resources:
+    requests: {cpu: 200m, memory: 256Mi}
+    limits:   {cpu: 1000m, memory: 512Mi}
+  env:
+    DATABASE_URL: ""         # injected from Secret in templates
+    OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+flink:
+  jobManager:
+    resources:
+      requests: {cpu: 500m, memory: 1Gi}
+      limits:   {cpu: 2000m, memory: 2Gi}
+  taskManager:
+    replicaCount: 2
+    numberOfTaskSlots: 4
+    resources:
+      requests: {cpu: 1000m, memory: 2Gi}
+      limits:   {cpu: 4000m, memory: 4Gi}
+  checkpointing:
+    interval: 30s
+    storageDir: s3://billing-checkpoints/flink

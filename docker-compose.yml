@@ -1,0 +1,158 @@
+version: "3.9"
+
+# Shared Kafka cluster ID — all brokers must use the same value in KRaft mode.
+# Generate once with: docker run --rm apache/kafka:3.7.0 kafka-storage.sh random-uuid
+x-kafka-cluster-id: &kafka-cluster-id "billing-local-cluster-001"
+
+x-kafka-common: &kafka-common
+  build: ./infra/kafka
+  environment:
+    KAFKA_PROCESS_ROLES: broker,controller
+    KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+    KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+    KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+    KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+    KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+    KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+    KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    KAFKA_LOG_DIRS: /var/kafka-logs
+    CLUSTER_ID: *kafka-cluster-id
+
+services:
+  # ── Kafka (3-node KRaft cluster) ──────────────────────────────────────────
+  kafka-1:
+    <<: *kafka-common
+    ports: ["9092:9092"]
+    environment:
+      <<: *kafka-common
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092
+    volumes:
+      - kafka-1-data:/var/kafka-logs
+
+  kafka-2:
+    <<: *kafka-common
+    ports: ["9094:9094"]
+    environment:
+      <<: *kafka-common
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: PLAINTEXT://:9094,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9094
+    volumes:
+      - kafka-2-data:/var/kafka-logs
+
+  kafka-3:
+    <<: *kafka-common
+    ports: ["9096:9096"]
+    environment:
+      <<: *kafka-common
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: PLAINTEXT://:9096,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9096
+    volumes:
+      - kafka-3-data:/var/kafka-logs
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    command: redis-server --appendonly yes --appendfsync everysec
+    ports: ["6379:6379"]
+    volumes:
+      - redis-data:/data
+
+  # ── Citus (PostgreSQL coordinator + 2 workers) ────────────────────────────
+  citus-coordinator:
+    build: ./infra/postgres-citus
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: billing
+      POSTGRES_PASSWORD: billing_secret
+      POSTGRES_DB: billing
+    volumes:
+      - citus-coordinator-data:/var/lib/postgresql/data/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U billing"]
+      interval: 5s
+      retries: 10
+
+  citus-worker-1:
+    build: ./infra/postgres-citus
+    environment:
+      POSTGRES_USER: billing
+      POSTGRES_PASSWORD: billing_secret
+      POSTGRES_DB: billing
+    volumes:
+      - citus-worker-1-data:/var/lib/postgresql/data/pgdata
+
+  citus-worker-2:
+    build: ./infra/postgres-citus
+    environment:
+      POSTGRES_USER: billing
+      POSTGRES_PASSWORD: billing_secret
+      POSTGRES_DB: billing
+    volumes:
+      - citus-worker-2-data:/var/lib/postgresql/data/pgdata
+
+  # ── Application services ──────────────────────────────────────────────────
+  ingestion:
+    build: ./services/ingestion
+    depends_on:
+      kafka-1: {condition: service_started}
+      redis:   {condition: service_started}
+    ports: ["8080:8080"]
+    environment:
+      KAFKA_BROKERS: kafka-1:9092,kafka-2:9094,kafka-3:9096
+      REDIS_URL: redis:6379
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      LOG_LEVEL: info
+
+  billing-api:
+    build: ./services/billing-api
+    depends_on:
+      citus-coordinator: {condition: service_healthy}
+    ports: ["8081:8081"]
+    environment:
+      DATABASE_URL: postgres://billing:billing_secret@citus-coordinator:5432/billing
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      LOG_LEVEL: info
+
+  # ── Flink cluster ─────────────────────────────────────────────────────────
+  flink-jobmanager:
+    build: ./services/flink-aggregator
+    command: jobmanager
+    ports: ["8082:8081"]  # Flink Web UI
+    environment:
+      KAFKA_BROKERS: kafka-1:9092,kafka-2:9094,kafka-3:9096
+      DATABASE_URL: jdbc:postgresql://citus-coordinator:5432/billing
+      DB_USER: billing
+      DB_PASSWORD: billing_secret
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        state.backend: rocksdb
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        execution.checkpointing.interval: 30s
+        execution.checkpointing.mode: EXACTLY_ONCE
+        execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+
+  flink-taskmanager:
+    build: ./services/flink-aggregator
+    command: taskmanager
+    depends_on: [flink-jobmanager]
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+
+volumes:
+  kafka-1-data:
+  kafka-2-data:
+  kafka-3-data:
+  redis-data:
+  citus-coordinator-data:
+  citus-worker-1-data:
+  citus-worker-2-data:
+  flink-checkpoints:

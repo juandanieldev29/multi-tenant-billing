@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "billing.fullname" . }}-ingestion
+  labels:
+    {{- include "billing.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestion
+spec:
+  replicas: {{ .Values.ingestion.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "billing.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ingestion
+  template:
+    metadata:
+      labels:
+        {{- include "billing.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ingestion
+    spec:
+      containers:
+        - name: ingestion
+          image: "{{ .Values.registry }}/ingestion:{{ .Values.tag }}"
+          imagePullPolicy: {{ .Values.ingestion.image.pullPolicy }}
+          ports:
+            - containerPort: 8080
+          env:
+            - name: KAFKA_BROKERS
+              value: {{ .Values.ingestion.env.KAFKA_BROKERS | quote }}
+            - name: REDIS_URL
+              value: {{ .Values.ingestion.env.REDIS_URL | quote }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.ingestion.env.OTEL_EXPORTER_OTLP_ENDPOINT | quote }}
+            # Used as part of Kafka transactional.id to ensure uniqueness per pod
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.ingestion.resources | nindent 12 }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "billing.fullname" . }}-ingestion
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "billing.fullname" . }}-ingestion
+  minReplicas: {{ .Values.ingestion.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.ingestion.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.ingestion.autoscaling.targetCPUUtilizationPercentage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "billing.fullname" . }}-ingestion
+spec:
+  selector:
+    {{- include "billing.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ingestion
+  ports:
+    - port: 8080
+      targetPort: 8080
