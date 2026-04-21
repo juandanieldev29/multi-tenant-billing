@@ -4,7 +4,7 @@ FROM apache/kafka:3.7.0
 COPY server.properties /opt/kafka/config/kraft/server.properties
 
 USER root
-RUN mkdir -p /var/kafka-logs && chown appuser:appgroup /var/kafka-logs
+RUN mkdir -p /var/kafka-logs && chown 1000:1000 /var/kafka-logs
 USER appuser
 
 EXPOSE 9092 9093
