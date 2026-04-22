@@ -21,9 +21,21 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	producer, err := kafka.NewProducer(strings.Split(mustEnv("KAFKA_BROKERS"), ","))
+	brokers := strings.Split(mustEnv("KAFKA_BROKERS"), ",")
+	var (
+		producer *kafka.Producer
+		err      error
+	)
+	for attempt := 1; attempt <= 10; attempt++ {
+		producer, err = kafka.NewProducer(brokers)
+		if err == nil {
+			break
+		}
+		logger.Warn("kafka not ready, retrying", "attempt", attempt, "err", err)
+		time.Sleep(5 * time.Second)
+	}
 	if err != nil {
-		logger.Error("failed to create kafka producer", "err", err)
+		logger.Error("failed to connect to kafka after retries", "err", err)
 		os.Exit(1)
 	}
 	defer producer.Close()

@@ -4,6 +4,8 @@ version: "3.9"
 # Generate once with: docker run --rm apache/kafka:3.7.0 kafka-storage.sh random-uuid
 x-kafka-cluster-id: &kafka-cluster-id "billing-local-cluster-001"
 
+# Separate anchor for env vars only — merging a service-level anchor into an
+# environment block would inject the whole service map as env keys (YAML bug).
 x-kafka-env: &kafka-env
   KAFKA_PROCESS_ROLES: broker,controller
   KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
@@ -33,7 +35,13 @@ services:
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092
     volumes:
-      - kafka-1-data:/var/kafka-logs
+      - ./data/kafka-1-data:/var/kafka-logs
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
 
   kafka-2:
     <<: *kafka-common
@@ -44,7 +52,7 @@ services:
       KAFKA_LISTENERS: PLAINTEXT://:9094,CONTROLLER://:9093
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9094
     volumes:
-      - kafka-2-data:/var/kafka-logs
+      - ./data/kafka-2-data:/var/kafka-logs
 
   kafka-3:
     <<: *kafka-common
@@ -55,7 +63,24 @@ services:
       KAFKA_LISTENERS: PLAINTEXT://:9096,CONTROLLER://:9093
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9096
     volumes:
-      - kafka-3-data:/var/kafka-logs
+      - ./data/kafka-3-data:/var/kafka-logs
+
+  # Creates required topics once kafka-1 is healthy. Exits immediately after.
+  kafka-init:
+    image: apache/kafka:3.7.0
+    depends_on:
+      kafka-1: {condition: service_healthy}
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 \
+          --create --if-not-exists \
+          --topic billing.events --partitions 64 --replication-factor 1 && \
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 \
+          --create --if-not-exists \
+          --topic billing.late-events --partitions 8 --replication-factor 1
+        echo "Topics created."
 
   # ── Redis ─────────────────────────────────────────────────────────────────
   redis:
@@ -63,7 +88,7 @@ services:
     command: redis-server --appendonly yes --appendfsync everysec
     ports: ["6379:6379"]
     volumes:
-      - redis-data:/data
+      - ./data/redis-data:/data
 
   # ── Citus (PostgreSQL coordinator + 2 workers) ────────────────────────────
   citus-coordinator:
@@ -74,7 +99,7 @@ services:
       POSTGRES_PASSWORD: billing_secret
       POSTGRES_DB: billing
     volumes:
-      - citus-coordinator-data:/var/lib/postgresql/data/pgdata
+      - ./data/citus-coordinator-data:/var/lib/postgresql/data/pgdata
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U billing"]
       interval: 5s
@@ -87,7 +112,7 @@ services:
       POSTGRES_PASSWORD: billing_secret
       POSTGRES_DB: billing
     volumes:
-      - citus-worker-1-data:/var/lib/postgresql/data/pgdata
+      - ./data/citus-worker-1-data:/var/lib/postgresql/data/pgdata
 
   citus-worker-2:
     build: ./infra/postgres-citus
@@ -96,16 +121,15 @@ services:
       POSTGRES_PASSWORD: billing_secret
       POSTGRES_DB: billing
     volumes:
-      - citus-worker-2-data:/var/lib/postgresql/data/pgdata
+      - ./data/citus-worker-2-data:/var/lib/postgresql/data/pgdata
 
   # ── Application services ──────────────────────────────────────────────────
   ingestion:
     build: ./services/ingestion
     depends_on:
-      kafka-1: {condition: service_started}
-      kafka-2: {condition: service_started}
-      kafka-3: {condition: service_started}
-      redis:   {condition: service_started}
+      kafka-init: {condition: service_completed_successfully}
+      kafka-1:    {condition: service_started}
+      redis:      {condition: service_started}
     ports: ["8080:8080"]
     environment:
       KAFKA_BROKERS: kafka-1:9092,kafka-2:9094,kafka-3:9096
@@ -141,7 +165,7 @@ services:
         execution.checkpointing.mode: EXACTLY_ONCE
         execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
     volumes:
-      - flink-checkpoints:/opt/flink/checkpoints
+      - ./data/flink-checkpoints:/opt/flink/checkpoints
 
   flink-taskmanager:
     build: ./services/flink-aggregator
