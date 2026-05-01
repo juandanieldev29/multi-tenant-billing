@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Shared Kafka cluster ID — all brokers must use the same value in KRaft mode.
 # Generate once with: docker run --rm apache/kafka:3.7.0 kafka-storage.sh random-uuid
 x-kafka-cluster-id: &kafka-cluster-id "billing-local-cluster-001"
@@ -16,11 +14,11 @@ x-kafka-env: &kafka-env
   KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
   KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
   KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-  KAFKA_LOG_DIRS: /var/kafka-logs
+  KAFKA_LOG_DIRS: /var/lib/kafka/data
   CLUSTER_ID: *kafka-cluster-id
 
 x-kafka-common: &kafka-common
-  build: ./infra/kafka
+  image: apache/kafka:3.7.0
   environment:
     <<: *kafka-env
 
@@ -28,14 +26,13 @@ services:
   # ── Kafka (3-node KRaft cluster) ──────────────────────────────────────────
   kafka-1:
     <<: *kafka-common
-    ports: ["9092:9092"]
+    container_name: kafka-1
+    hostname: kafka-1
     environment:
       <<: *kafka-env
       KAFKA_NODE_ID: 1
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092
-    volumes:
-      - ./data/kafka-1-data:/var/kafka-logs
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
       interval: 10s
@@ -45,61 +42,86 @@ services:
 
   kafka-2:
     <<: *kafka-common
-    ports: ["9094:9094"]
+    container_name: kafka-2
+    hostname: kafka-2
     environment:
       <<: *kafka-env
       KAFKA_NODE_ID: 2
-      KAFKA_LISTENERS: PLAINTEXT://:9094,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9094
-    volumes:
-      - ./data/kafka-2-data:/var/kafka-logs
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
 
   kafka-3:
     <<: *kafka-common
-    ports: ["9096:9096"]
+    container_name: kafka-3
+    hostname: kafka-3
     environment:
       <<: *kafka-env
       KAFKA_NODE_ID: 3
-      KAFKA_LISTENERS: PLAINTEXT://:9096,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9096
-    volumes:
-      - ./data/kafka-3-data:/var/kafka-logs
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-cluster-ui
+    hostname: kafka-cluster-ui
+    ports:
+      - "8083:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+    depends_on:
+      - kafka-1
+      - kafka-2
+      - kafka-3
 
   # Creates required topics once kafka-1 is healthy. Exits immediately after.
   kafka-init:
     image: apache/kafka:3.7.0
     depends_on:
       kafka-1: {condition: service_healthy}
+      kafka-2: {condition: service_healthy}
+      kafka-3: {condition: service_healthy}
     restart: "no"
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 \
           --create --if-not-exists \
-          --topic billing.events --partitions 64 --replication-factor 1 && \
+          --topic billing.events --partitions 3 --replication-factor 2 && \
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 \
           --create --if-not-exists \
-          --topic billing.late-events --partitions 8 --replication-factor 1
+          --topic billing.late-events --partitions 3 --replication-factor 2
         echo "Topics created."
 
   # ── Redis ─────────────────────────────────────────────────────────────────
   redis:
     image: redis:7.2-alpine
     command: redis-server --appendonly yes --appendfsync everysec
+    container_name: redis
+    hostname: redis
     ports: ["6379:6379"]
-    volumes:
-      - ./data/redis-data:/data
 
   # ── Citus (PostgreSQL coordinator + 2 workers) ────────────────────────────
   citus-coordinator:
     build: ./infra/postgres-citus
-    ports: ["5432:5432"]
+    container_name: citus-coordinator
+    hostname: citus-coordinator
     environment:
       POSTGRES_USER: billing
       POSTGRES_PASSWORD: billing_secret
       POSTGRES_DB: billing
-    volumes:
-      - ./data/citus-coordinator-data:/var/lib/postgresql/data/pgdata
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U billing"]
       interval: 5s
@@ -107,28 +129,29 @@ services:
 
   citus-worker-1:
     build: ./infra/postgres-citus
+    container_name: citus-worker-1
+    hostname: citus-worker-1
     environment:
       POSTGRES_USER: billing
       POSTGRES_PASSWORD: billing_secret
       POSTGRES_DB: billing
-    volumes:
-      - ./data/citus-worker-1-data:/var/lib/postgresql/data/pgdata
 
   citus-worker-2:
     build: ./infra/postgres-citus
+    container_name: citus-worker-2
+    hostname: citus-worker-2
     environment:
       POSTGRES_USER: billing
       POSTGRES_PASSWORD: billing_secret
       POSTGRES_DB: billing
-    volumes:
-      - ./data/citus-worker-2-data:/var/lib/postgresql/data/pgdata
 
   # ── Application services ──────────────────────────────────────────────────
   ingestion:
     build: ./services/ingestion
+    container_name: ingestion
+    hostname: ingestion
     depends_on:
       kafka-init: {condition: service_completed_successfully}
-      kafka-1:    {condition: service_started}
       redis:      {condition: service_started}
     ports: ["8080:8080"]
     environment:
@@ -139,6 +162,8 @@ services:
 
   billing-api:
     build: ./services/billing-api
+    container_name: billing
+    hostname: billing
     depends_on:
       citus-coordinator: {condition: service_healthy}
     ports: ["8081:8081"]
@@ -150,10 +175,14 @@ services:
   # ── Flink cluster ─────────────────────────────────────────────────────────
   flink-jobmanager:
     build: ./services/flink-aggregator
-    command: jobmanager
+    command: standalone-job --job-classname com.billing.AggregationJob
+    hostname: flink-jobmanager
+    container_name: flink-jobmanager
     ports: ["8082:8081"]  # Flink Web UI
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
     environment:
-      KAFKA_BROKERS: kafka-1:9092,kafka-2:9094,kafka-3:9096
+      KAFKA_BROKERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
       DATABASE_URL: jdbc:postgresql://citus-coordinator:5432/billing
       DB_USER: billing
       DB_PASSWORD: billing_secret
@@ -164,24 +193,14 @@ services:
         execution.checkpointing.interval: 30s
         execution.checkpointing.mode: EXACTLY_ONCE
         execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
-    volumes:
-      - ./data/flink-checkpoints:/opt/flink/checkpoints
 
   flink-taskmanager:
     build: ./services/flink-aggregator
     command: taskmanager
+    hostname: flink-taskmanager
+    container_name: flink-taskmanager
     depends_on: [flink-jobmanager]
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 4
-
-volumes:
-  kafka-1-data:
-  kafka-2-data:
-  kafka-3-data:
-  redis-data:
-  citus-coordinator-data:
-  citus-worker-1-data:
-  citus-worker-2-data:
-  flink-checkpoints:

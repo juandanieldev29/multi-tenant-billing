@@ -1,6 +1,6 @@
 .PHONY: build test lint docker-build docker-push chaos-test bench clean
 
-REGISTRY ?= ghcr.io/activeprospect
+REGISTRY ?= ghcr.io/juandanieldev29
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 GO_SERVICES = ingestion billing-api
 
