@@ -91,12 +91,12 @@ public class AggregationJob {
             })
             .addSink(JdbcSink.sink(
                 "INSERT INTO usage_aggregates " +
-                "(tenant_id, event_type, window_start, window_end, window_duration, total_quantity, event_count) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?) " +
+                "(tenant_id, event_type, window_start, window_end, window_duration, total_quantity, event_count, updated_at) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
                 "ON CONFLICT (tenant_id, event_type, window_start, window_duration) " +
                 "DO UPDATE SET total_quantity = EXCLUDED.total_quantity, " +
                 "              event_count    = EXCLUDED.event_count, " +
-                "              updated_at     = NOW()",
+                "              updated_at     = EXCLUDED.updated_at",
                 (stmt, agg) -> {
                     stmt.setString(1, agg.tenantId);
                     stmt.setString(2, agg.eventType);
@@ -105,6 +105,7 @@ public class AggregationJob {
                     stmt.setString(5, agg.windowDuration);
                     stmt.setDouble(6, agg.totalQuantity);
                     stmt.setLong(7, agg.eventCount);
+                    stmt.setTimestamp(8, java.sql.Timestamp.from(Instant.now()));
                 },
                 JdbcExecutionOptions.builder()
                     .withBatchSize(1000)
